@@ -44,7 +44,7 @@ class Handler{
 })
 ->hook('after', function($result, $router){
     if ($result) {
-        header('Content-type: application/'. (isset($_GET['jsoncallback'])?'javascript':'json'));
+        //header('Content-type: application/'. (isset($_GET['jsoncallback'])?'javascript':'json'));
         if (isset($_GET['jsoncallback']))
             print $_GET['jsoncallback']. '('. json_encode($result). ')';
         else print json_encode($result);
@@ -68,9 +68,16 @@ class Handler{
 // reset the prefix, or you can just set to another prefix
 ->group()
 ->get('/hello/:name:a.:ext', function($name, $ext){
+    echo "#centent\n";
     if ('js' == $ext || 'json' == $ext) return array('name'=>$name);
     return array('code'=>1, 'msg'=>'error message...');
-}, 'auth')
+}, ['auth','meddiaware_example'])
+->hook('meddiaware_example',function($next){
+    echo "#top\n";
+    $result = $next();
+    echo "#bottom\n";
+    return $result;
+})
 ->execute(array(), php_sapi_name() == 'cli' ? 'GET' : null, php_sapi_name() == 'cli' ?  '/hello/lloyd.json': null);
 
 /**
