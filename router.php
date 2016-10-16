@@ -42,12 +42,20 @@ class Router {
             /**
              * if defined ctype validate function, for the current params, call the ctype function to validate $current_token
              * example: "/hello/:name:a.json", and url "/hello/lloyd.json" will call "ctype_alpha" to validate "lloyd"
-             */
+             */ 
             if ($pos = stripos($child_token, self::COLON)){
                 if (($m=substr($child_token, $pos+1)) && isset($this->_ctypes[$m]) && !call_user_func('ctype_'.$this->_ctypes[$m], $current_token))
                     continue;
                 $child_token = substr($child_token, 0, $pos);
             }
+            elseif(isset($this->_events['params:'.$child_token])){
+                $reg = $this->_events['params:'.$child_token]; 
+                if($reg[0]=='/' && !preg_match($reg,$current_token))
+                    continue;
+                if(  isset($this->_ctypes[$reg]) && !call_user_func('ctype_'.$this->_ctypes[$reg], $current_token))
+                    continue; 
+            }
+
             /**
              * if $current_token not null, and $child_token start with ":"
              * set the parameter named $pname and resolve next $path.
@@ -65,10 +73,23 @@ class Router {
         $tokens = explode(self::SEPARATOR, str_replace('.', self::SEPARATOR, $path));
         return $this->_resolve(array_key_exists($method, $this->_tree) ? $this->_tree[$method] : $this->_default_node, $tokens, $params);
     }
+
+    public function get_func_args($callee,$params ){
+        $args=array();
+        $params = array_merge($this->params,$params);  
+        $ref = is_array($callee) && isset($callee[1]) 
+            ? new ReflectionMethod($callee[0], $callee[1]) 
+            : new ReflectionFunction($callee); 
+        foreach ($ref->getParameters() as $p) 
+            $args[$p->getName()] = isset($params[$p->getName()]) 
+                ? $params[$p->getName()] 
+                : ($p->isOptional()?$p->getDefaultValue():null); 
+        return $args;
+    }
     /* API to find handler and execute it by parameters. */
     public function execute($params=array(), $method=null, $path=null){
-        $method = $method ? $method : $_SERVER['REQUEST_METHOD'];
-        $path = $path ? $path : parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+        //$method = $method ? $method : $_SERVER['REQUEST_METHOD'];
+        //$path = $path ? $path : parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
         list($cb, $hook, $params) = $this->resolve($method, $path, $params);
         if (!is_callable($cb)) return $this->error(405, "Could not resolve [$method] $path");
         /**
@@ -80,22 +101,34 @@ class Router {
         $input = ((isset($_SERVER['HTTP_CONTENT_TYPE']) && 'application/json' == $_SERVER['HTTP_CONTENT_TYPE'])
             || (isset($_SERVER['CONTENT_TYPE']) && 'application/json' == $_SERVER['CONTENT_TYPE']))
             ? (array)json_decode(file_get_contents('php://input'), true) : array();
-        $this->params = array_merge($params, $_SERVER, $_REQUEST, $input, $_FILES, $_COOKIE, isset($_SESSION)?$_SESSION:array(), array('router'=>$this));
-        foreach(array_merge(array('before'), $hook) as $i=>$h){
-            if (false === $this->hook($h, $this)) return $this->error(406, "Failed to execute hook: $h");
-        }
-        /**
-         * auto get the variable list based on the callback handler parameter list.
-         * if the named parameter set in user defined $params or in request, get the value.
-         * if the named parameter not set, get the default value in callback handler.
-         */
-        $ref = is_array($cb) && isset($cb[1]) ? new ReflectionMethod($cb[0], $cb[1]) : new ReflectionFunction($cb);
-        $args = $ref->getParameters();
-        array_walk($args, function(&$p, $i, $params){
-            $p = isset($params[$p->getName()]) ? $params[$p->getName()] : ($p->isOptional() ? $p->getDefaultValue() : null);
-        }, $this->params);
-        /* execute the callback handler and pass the result into "after" hook handler.*/
-        return $this->hook('after', call_user_func_array($cb, $args), $this);
+        $this->params = array_merge($params, $_SERVER, $_REQUEST, $input, $_FILES, $_COOKIE, isset($_SESSION)?$_SESSION:array() , array('router'=>$this)); 
+ 
+        //compatible before&after
+        array_unshift($hook,function($router ,$next ){ 
+            if(false===$this->hook('before',$router))return false;   
+            $this->hook('after',$next(),$router);
+        });  
+        array_push($hook,$cb);
+        $next = function() use(&$hook,&$next){ 
+            $name = array_shift($hook); 
+            if(empty($name)) return; 
+            if(is_callable($name)) $func = $name; 
+            elseif( isset($this->_events['hook:'.$name]) )
+                 $func = @$this->_events['hook:'.$name]  ;
+            if(isset($func))  { 
+                $args = $this->get_func_args($func,['next'=>$next]); 
+               
+                if( isset($args['next']) ){  
+                    return call_user_func_array($func, array_values($args) );    
+                }else{   
+                    $res = call_user_func_array($func, array_values($args) ); 
+                    if(false === $res) return false; 
+                    return $next()?:$res; 
+                }  
+            } 
+            else return $next(); 
+        };  
+        return $next();
     }
     public function match($method, $path, $cb, $hook=null){
         foreach((array)($method) as $m){
@@ -110,22 +143,54 @@ class Router {
     }
     /* register api based on request method. also register "error" and "hook" API. */
     public function __call($name, $args){
+        //->get('path',function(){});
         if (in_array($name, array('get', 'post', 'put', 'patch', 'delete', 'trace', 'connect', 'options', 'head'))
             && array_unshift($args, $name))
             return call_user_func_array(array($this, 'match'), $args);
+            
+        //->group('path',function(){});
         if (in_array($name, array('group', 'prefix'))){
             $this->prefix = isset($args[0]) && is_string($args[0]) && self::SEPARATOR == $args[0][0] ? $args[0] : '';
             $this->prefix_hook = isset($args[1]) ? (array)$args[1] : array();
         }
-        if (in_array($name, array('error', 'hook'))){
+ 
+        //->hook('after',function(){});
+        //->error('403',function(){});   
+        if (in_array($name, array('error', 'hook'))){  
             $key = $name. ':'. array_shift($args);
             if (isset($args[0]) && is_callable($args[0]))
                 $this->_events[$key] = $args[0];
             else if (isset($this->_events[$key]) && is_callable($this->_events[$key]))
-                return call_user_func_array($this->_events[$key], $args);
-            else return ('error' == $name) ? trigger_error('"'.$key.'" not defined to handler error: '.$args[0]) : $args[0];
+                return call_user_func_array($this->_events[$key], $args); 
+        } 
+ 
+        //->config('aa',include '') 
+        //->register('aa',function(){}) 
+        //->params('id','/\d/') 
+        if (in_array($name, array( 'config','register','params'))){  
+            $key = $name. ':'. array_shift($args);  
+            if( isset($args[0]) )
+                $this->_events[$key] = $args[0];    
         }
+
+        //class
+        if(isset($this->$name) and is_callable($this->$name)){ 
+            return call_user_func_array($this->$name,$args); 
+        } 
         return $this;
+    }
+
+    public function __get($name){  
+        if(isset($this->_events['config:'.$name])){
+            $this->$name= $this->_events['config:'.$name];
+            return $this->$name;
+        } 
+        if(isset($this->_events['register:'.$name])){ 
+            $callee = $this->_events['register:'.$name];
+            $args = $this->get_func_args($callee,array() );  
+            $this->$name = call_user_func_array($callee, array_values($args) );
+            return $this->$name; 
+        } 
     }
 }
 

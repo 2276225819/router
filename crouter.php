@@ -11,6 +11,7 @@ class CRouter extends Router {
     protected $target = null;
     protected $debug = null;
     protected $compile = null;
+    protected $ns=array();
 
     /* helper function to get the compile status*/
     protected function needCompile(){
@@ -50,18 +51,31 @@ class CRouter extends Router {
         $this->debug = $debug;
         $this->target = $target?$target:$_SERVER['SCRIPT_FILENAME'].'c';
     }
+    
+    public function using($namespace){
+        $this->ns[$namespace]=true;
+    }
+
     /**
      * compile router into source code, and execute the compiled source code with parameters.
      */
     public function execute($params=array(), $method=null, $path=null){
         if ($this->needCompile()){
-            $code = "<?php\nreturn new Router("
+            $nsstr='';
+            foreach($this->ns as $namespace=>$v)$nsstr.="use $namespace;\n"; 
+            $code = "<?php\n{$nsstr}\nreturn new Router("
                 . $this->export($this->_tree, true). ', '
                 . $this->export($this->_events, true). ');';
             file_put_contents($this->target, $code);
         }
-        $router = include ($this->target);
+        $router = include ($this->target); 
         return $router->execute($params, $method, $path);
-    }
+    } 
+
+    public function run($path,$method,$callback){
+        if ($this->needCompile())
+            $callback($this); 
+        return $this->execute(array(), $method, $path);
+    } 
 }
 
