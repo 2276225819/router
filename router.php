@@ -9,14 +9,33 @@ class Router {
     protected $prefix_hook = array();
     protected $_tree = array();
     protected $_events = array();
+    protected $_middleware = array();
     protected $_ctypes = array('A' => 'alnum', 'a' => 'alpha', 'd' => 'digit', 'x' => 'xdigit', 'l' => 'lower', 'u' => 'upper');
     protected $_default_node = array(self::COLON => array());
     const COLON = ':';
     const SEPARATOR = '/';
     const LEAF = 'LEAF';
-    public function __construct($tree=array(), $events=array()){
+    public function __construct($tree=array(), $events=array(),$middleware=array()){
         $this->_tree = $tree;
-        $this->_events = $events;
+        $this->_events = $events; 
+        $this->_middleware = $middleware; 
+        
+        //compatible php5.3 unsupported_$this
+        $_events = &$this->_events;
+        $_this = &$this; 
+        //compatible before&after
+        array_unshift($this->_middleware,function($router ,$next )use(&$_events,&$_this){ 
+            if(isset($_events["hook:before"])){ 
+                $func = $_events["hook:before"];
+                $args = $_this->get_func_args( $func ) ; 
+                $res = call_user_func_array($func, array_values($args) ); 
+                if(false===$res) return false;    
+            } 
+            if(isset($_events["hook:after"])){ 
+                return $_this->hook('after',$next(),$router); 
+            }
+            return $next(); 
+        });   
     }
     /* helper function to create the tree based on urls, handlers will stored to leaf. */
     protected function match_one_path(&$node, $tokens, $cb, $hook){
@@ -66,15 +85,32 @@ class Router {
         return $this->_resolve(array_key_exists($method, $this->_tree) ? $this->_tree[$method] : $this->_default_node, $tokens, $params);
     }    
     public function get_func_args($callee,$params ){
-        $args=array();
+        $args = array();
         $params = array_merge($this->params,$params);  
         $ref = is_array($callee) && isset($callee[1]) 
             ? new ReflectionMethod($callee[0], $callee[1]) 
             : new ReflectionFunction($callee); 
-        foreach ($ref->getParameters() as $p) 
-            $args[$p->getName()] = isset($params[$p->getName()]) 
-                ? $params[$p->getName()] 
-                : ($p->isOptional()?$p->getDefaultValue():null); 
+        foreach ($ref->getParameters() as $p) {  
+            $name = $p->getName(); 
+            //compatible php5.3 unsupported_type
+            if(is_callable(array($p,'getType'))) {
+                if($_type = (string) $p->getType()) 
+                    $name = $_type;   
+            }  
+            if( isset($params[ $name ]) ){
+                $args[$name] = $params[$name];
+                continue;
+            } 
+            if($p->isOptional()){
+                $args[$name] = $p->getDefaultValue();
+                continue;
+            }  
+            if($this instanceof $name){ 
+                $args[$name] = $params[$name]=$this;
+                continue;
+            } 
+            throw new Exception("Error $p", 1); 
+        }    
         return $args;
     }
     /* API to find handler and execute it by parameters. */
@@ -93,22 +129,26 @@ class Router {
             || (isset($_SERVER['CONTENT_TYPE']) && 'application/json' == $_SERVER['CONTENT_TYPE']))
             ? (array)json_decode(file_get_contents('php://input'), true) : array();
         $this->params = array_merge($params, $_SERVER, $_REQUEST, $input, $_FILES, $_COOKIE, isset($_SESSION)?$_SESSION:array(), array('router'=>$this));
-        
-        //compatible before&after
-        array_unshift($hook,function($router ,$next ){ 
-            if(false===$this->hook('before',$router))return false;   
-            $this->hook('after',$next(),$router);
-        });  
-        array_push($hook,$cb);
-        $next = function() use(&$hook,&$next){ 
+        $this->method = $method;
+        $this->path = $path;
+        $this->hook = $hook;
+
+
+        //add middleware
+        array_push($hook,$cb);   
+        for ($i=count($this->_middleware)-1; $i>=0; $i--) 
+            array_unshift($hook,$this->_middleware[$i]);  
+ 
+        //compatible php5.3 unsupported_$this
+        $_this = $this;
+        $_events = &$this->_events; 
+        $next = function() use(&$hook,&$next,&$_this,&$_events){ 
             $name = array_shift($hook); 
             if(empty($name)) return; 
             if(is_callable($name)) $func = $name; 
-            elseif( isset($this->_events['hook:'.$name]) )
-                 $func = @$this->_events['hook:'.$name]  ;
-            if(isset($func))  { 
-                $args = $this->get_func_args($func,['next'=>$next]); 
-               
+            else $func = $_events["hook:{$name}"];   
+            if(isset($func))  {  
+                $args = $_this->get_func_args($func,array('next'=>$next )) ;  
                 if( isset($args['next']) ){  
                     return call_user_func_array($func, array_values($args) );    
                 }else{   
@@ -140,6 +180,9 @@ class Router {
         if (in_array($name, array('group', 'prefix'))){
             $this->prefix = isset($args[0]) && is_string($args[0]) && self::SEPARATOR == $args[0][0] ? $args[0] : '';
             $this->prefix_hook = isset($args[1]) ? (array)$args[1] : array();
+        }
+        if($name == 'add'){
+            $this->_middleware[]=$args[0];
         }
         if (in_array($name, array('error', 'hook'))){
             $key = $name. ':'. array_shift($args);
