@@ -47,6 +47,7 @@ class CRouter extends Router {
 
     /* construct function */
     public function __construct($target=null, $debug=false){
+        parent::__construct();
         $this->debug = $debug;
         $this->target = $target?$target:$_SERVER['SCRIPT_FILENAME'].'c';
     }
